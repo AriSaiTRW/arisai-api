@@ -1,45 +1,4 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/*.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "/api/$1.py"
-    }
-  ],
-  "headers": [
-    {
-      "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, OPTIONS"
-        },
-        {
-          "key": "Cache-Control",
-          "value": "s-maxage=300, stale-while-revalidate"
-        }
-      ]
-    }
-  ]
+  "regions": ["sin1"]
 }
-```
-
-**What `Cache-Control` does:** Tells Vercel to cache responses for 5 minutes. Protects you from hitting Bybit/CoinMetrics rate limits and makes your charts load faster.
-
----
-
-### Step 9 — Write `requirements.txt`
-
-This tells Vercel which Python libraries to install:
-```
-requests==2.31.0
