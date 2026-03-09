@@ -727,7 +727,7 @@ def compute_all_indicators():
 
     # ── MTPI ──────────────────────────────────────────
     try:
-        mtpi_start = int((time.time() - 400 * 86400) * 1000)
+        mtpi_start = int(time.mktime(time.strptime("2023-01-01", "%Y-%m-%d")) * 1000)
         daily_fast = fetch_ohlcv(symbol="BTCUSDT", interval="1d", start_ms=mtpi_start)
 
         mtpi_engine = compute_mtpi_engine(daily_fast)
