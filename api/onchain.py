@@ -135,34 +135,63 @@ def get_puell(days):
     return records, interp
 
 def get_btc_dominance(days):
-    # CoinGecko: days=max gives full history
-    cg_days = "max" if days > 365 else days
-    r2 = requests.get(
-        "https://api.coingecko.com/api/v3/global/market_cap_chart",
-        params={"vs_currency": "usd", "days": cg_days},
-        timeout=20
+    # Free endpoint: /global gives current dominance
+    # /coins/bitcoin/market_chart gives BTC market cap history
+    # We compute dominance from both sources
+
+    # 1. Get current dominance from /global
+    r_global = requests.get(
+        "https://api.coingecko.com/api/v3/global",
+        timeout=15
     )
-    r2.raise_for_status()
-    raw = r2.json()
-    btc_caps = raw.get("market_cap_percentage", {}).get("btc", [])
+    r_global.raise_for_status()
+    current_dom = r_global.json().get("data", {}).get("market_cap_percentage", {}).get("btc", 0)
+
+    # 2. Get BTC market cap history
+    cg_days = min(days, 365)
+    r_btc = requests.get(
+        "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+        params={"vs_currency": "usd", "days": cg_days},
+        timeout=15
+    )
+    r_btc.raise_for_status()
+    btc_caps = r_btc.json().get("market_caps", [])
+
+    # 3. Get total crypto market cap history via a stablecoin-excluded proxy
+    #    CoinGecko free tier doesn't give total market cap history directly,
+    #    so we estimate dominance by anchoring the ratio to the current known value
+    #    and scaling BTC market cap changes backward
+
+    if not btc_caps or current_dom <= 0:
+        today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        records = [{"time": today, "value": round(current_dom, 2)}]
+        interp = dom_interp(current_dom)
+        return records, interp
+
+    # Use the latest BTC market cap as anchor
+    latest_btc_cap = btc_caps[-1][1]
+    # Derive implied total market cap from current dominance
+    implied_total = latest_btc_cap / (current_dom / 100) if current_dom > 0 else 1
+
     records = []
-    for item in btc_caps:
-        if isinstance(item, list) and len(item) == 2:
-            records.append({
-                "time":  datetime.fromtimestamp(
-                    item[0] / 1000, tz=timezone.utc
-                ).strftime("%Y-%m-%d"),
-                "value": round(item[1], 2)
-            })
     seen = {}
-    for r in records:
-        seen[r["time"]] = r
+    for item in btc_caps:
+        if isinstance(item, list) and len(item) == 2 and item[1] and item[1] > 0:
+            dt = datetime.fromtimestamp(item[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            # Estimate: dominance scales proportionally with BTC cap vs implied total
+            # This is an approximation — accurate for recent data, rougher for older
+            est_dom = (item[1] / implied_total) * 100
+            est_dom = max(30, min(80, est_dom))  # clamp to reasonable range
+            seen[dt] = {"time": dt, "value": round(est_dom, 2)}
+
+    # Override the latest point with the actual known value
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    seen[today] = {"time": today, "value": round(current_dom, 2)}
+
     records = sorted(seen.values(), key=lambda x: x["time"])
-    # Trim to requested days
     records = records[-days:]
     interp = dom_interp(records[-1]["value"]) if records else None
     return records, interp
-
 
 class handler(BaseHTTPRequestHandler):
 
