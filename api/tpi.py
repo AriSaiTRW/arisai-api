@@ -781,7 +781,6 @@ def compute_all_indicators():
         result["ltpi_error"] = str(e)
 
     return result
-    import datetime
     result["computed_at"] = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
 
     return result
