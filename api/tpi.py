@@ -675,20 +675,28 @@ def compute_ltpi_engine(candles):
     # LTPI Score
     # --------------------------------------------------
 
-    score = []
-    signal = []
+# --------------------------------------------------
+# LTPI Score
+# --------------------------------------------------
 
-    for a, b, c, d in zip(afrtrend, atrtrend, supatrend, magictt):
+    score = []
+    signal = [0]
+
+    for a,b,c,d in zip(afrtrend, atrtrend, supatrend, magictt):
 
         val = (a + b + c + d) / 4
         score.append(val)
+
+        prev = signal[-1]
 
         if val > 0.1:
             signal.append(1)
         elif val < -0.1:
             signal.append(-1)
         else:
-            signal.append(0)
+            signal.append(prev)
+
+    signal = signal[1:]
 
     return {
         "score": score,
