@@ -788,9 +788,7 @@ def compute_all_indicators():
     except Exception as e:
         result["ltpi_error"] = str(e)
 
-    return result
     result["computed_at"] = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
-
     return result
 # ======================================================
 # HTTP API
