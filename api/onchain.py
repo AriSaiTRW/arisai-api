@@ -37,7 +37,7 @@ def fetch_cm(metric_key, days):
         "assets":    "btc",
         "metrics":   metric_key,
         "frequency": "1d",
-        "page_size": min(days, 3000),  # CoinMetrics max
+        "page_size": min(days, 3000),
     }, timeout=20)
     r.raise_for_status()
     records = []
@@ -77,7 +77,6 @@ def get_realized_price(days):
     return records, interp
 
 def get_fear_greed(days):
-    # Alternative.me hard cap is 365 days
     limit = min(days, 365)
     r = requests.get(
         "https://api.alternative.me/fng/",
@@ -100,7 +99,6 @@ def get_fear_greed(days):
     return records, interp
 
 def get_puell(days):
-    # Blockchain.com safe max ~1500 days
     fetch_days = min(days + 365, 1500)
     r = requests.get(
         "https://api.blockchain.info/charts/miners-revenue",
@@ -135,11 +133,6 @@ def get_puell(days):
     return records, interp
 
 def get_btc_dominance(days):
-    # Free endpoint: /global gives current dominance
-    # /coins/bitcoin/market_chart gives BTC market cap history
-    # We compute dominance from both sources
-
-    # 1. Get current dominance from /global
     r_global = requests.get(
         "https://api.coingecko.com/api/v3/global",
         timeout=15
@@ -147,7 +140,6 @@ def get_btc_dominance(days):
     r_global.raise_for_status()
     current_dom = r_global.json().get("data", {}).get("market_cap_percentage", {}).get("btc", 0)
 
-    # 2. Get BTC market cap history
     cg_days = min(days, 365)
     r_btc = requests.get(
         "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
@@ -157,20 +149,13 @@ def get_btc_dominance(days):
     r_btc.raise_for_status()
     btc_caps = r_btc.json().get("market_caps", [])
 
-    # 3. Get total crypto market cap history via a stablecoin-excluded proxy
-    #    CoinGecko free tier doesn't give total market cap history directly,
-    #    so we estimate dominance by anchoring the ratio to the current known value
-    #    and scaling BTC market cap changes backward
-
     if not btc_caps or current_dom <= 0:
         today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
         records = [{"time": today, "value": round(current_dom, 2)}]
         interp = dom_interp(current_dom)
         return records, interp
 
-    # Use the latest BTC market cap as anchor
     latest_btc_cap = btc_caps[-1][1]
-    # Derive implied total market cap from current dominance
     implied_total = latest_btc_cap / (current_dom / 100) if current_dom > 0 else 1
 
     records = []
@@ -178,13 +163,10 @@ def get_btc_dominance(days):
     for item in btc_caps:
         if isinstance(item, list) and len(item) == 2 and item[1] and item[1] > 0:
             dt = datetime.fromtimestamp(item[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-            # Estimate: dominance scales proportionally with BTC cap vs implied total
-            # This is an approximation — accurate for recent data, rougher for older
             est_dom = (item[1] / implied_total) * 100
-            est_dom = max(30, min(80, est_dom))  # clamp to reasonable range
+            est_dom = max(30, min(80, est_dom))
             seen[dt] = {"time": dt, "value": round(est_dom, 2)}
 
-    # Override the latest point with the actual known value
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     seen[today] = {"time": today, "value": round(current_dom, 2)}
 
@@ -193,21 +175,178 @@ def get_btc_dominance(days):
     interp = dom_interp(records[-1]["value"]) if records else None
     return records, interp
 
+
+# ======================================================
+# NEW: Thermocap Multiple
+# Market Cap / Cumulative Miner Revenue
+# ======================================================
+
+def get_thermocap_ratio(days):
+    # Fetch max available daily miner revenue for cumulative sum
+    rev_data = fetch_cm("RevUSD", 3000)
+    mktcap_data = fetch_cm("CapMrktCurUSD", days)
+
+    if not rev_data or not mktcap_data:
+        return [], None
+
+    # Build cumulative revenue (thermocap)
+    cum_rev = {}
+    running = 0
+    for r in rev_data:
+        running += r["value"]
+        cum_rev[r["time"]] = running
+
+    # Thermocap Multiple = Market Cap / Cumulative Miner Revenue
+    records = []
+    for m in mktcap_data:
+        cr = cum_rev.get(m["time"])
+        if cr and cr > 0:
+            records.append({
+                "time": m["time"],
+                "value": round(m["value"] / cr, 2)
+            })
+
+    records = records[-days:]
+
+    interp = None
+    if records:
+        v = records[-1]["value"]
+        if v < 8:
+            interp = f"Thermocap {v:.1f}x — Undervalued. Strong accumulation zone."
+        elif v < 16:
+            interp = f"Thermocap {v:.1f}x — Fair value range."
+        elif v < 32:
+            interp = f"Thermocap {v:.1f}x — Elevated. Late cycle positioning."
+        else:
+            interp = f"Thermocap {v:.1f}x — Overheated. Historically near cycle tops."
+
+    return records, interp
+
+
+# ======================================================
+# NEW: Stablecoin Supply (USDT + USDC)
+# ======================================================
+
+def get_stablecoin_supply(days):
+    cg_days = min(days, 365)
+
+    by_date = {}
+    for coin_id in ["tether", "usd-coin"]:
+        try:
+            r = requests.get(
+                f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart",
+                params={"vs_currency": "usd", "days": cg_days},
+                timeout=15
+            )
+            r.raise_for_status()
+            for item in r.json().get("market_caps", []):
+                if isinstance(item, list) and len(item) == 2 and item[1]:
+                    dt = datetime.fromtimestamp(
+                        item[0] / 1000, tz=timezone.utc
+                    ).strftime("%Y-%m-%d")
+                    by_date[dt] = by_date.get(dt, 0) + item[1]
+        except Exception:
+            pass
+
+    records = [{"time": k, "value": round(v, 0)}
+               for k, v in sorted(by_date.items())]
+    records = records[-days:]
+
+    interp = None
+    if records:
+        v = records[-1]["value"]
+        label = f"Stablecoin supply ${v / 1e9:.1f}B — "
+        if len(records) >= 30:
+            prev = records[-30]["value"]
+            if prev > 0:
+                change = ((v - prev) / prev) * 100
+                if change > 3:
+                    label += f"Growing (+{change:.1f}% 30d). Liquidity expanding."
+                elif change < -3:
+                    label += f"Contracting ({change:.1f}% 30d). Liquidity draining."
+                else:
+                    label += f"Stable ({change:+.1f}% 30d). Neutral liquidity."
+            else:
+                label += "USDT + USDC combined."
+        else:
+            label += "USDT + USDC combined market cap."
+        interp = label
+
+    return records, interp
+
+
+# ======================================================
+# NEW: Long/Short Ratio (Binance Global)
+# ======================================================
+
+def get_long_short_ratio(days):
+    limit = min(days, 500)
+    r = requests.get(
+        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+        params={"symbol": "BTCUSDT", "period": "1d", "limit": limit},
+        headers={"User-Agent": "AriSaiQuant/1.0"},
+        timeout=15
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    records = []
+    for item in data:
+        ts = int(item["timestamp"]) / 1000
+        records.append({
+            "time": datetime.fromtimestamp(
+                ts, tz=timezone.utc
+            ).strftime("%Y-%m-%d"),
+            "value": round(float(item["longShortRatio"]), 4),
+            "long_pct": round(float(item.get("longAccount", 0)) * 100, 1),
+            "short_pct": round(float(item.get("shortAccount", 0)) * 100, 1),
+        })
+
+    records.sort(key=lambda x: x["time"])
+    records = records[-days:]
+
+    interp = None
+    if records:
+        v = records[-1]["value"]
+        lp = records[-1].get("long_pct", 0)
+        sp = records[-1].get("short_pct", 0)
+        base = f"L/S {v:.2f} ({lp:.0f}%L / {sp:.0f}%S) — "
+        if v > 2.0:
+            interp = base + "Extreme long bias. Crowded trade. Squeeze risk."
+        elif v > 1.3:
+            interp = base + "Long-biased. Market optimistic."
+        elif v > 0.7:
+            interp = base + "Balanced positioning. No strong directional bias."
+        elif v > 0.5:
+            interp = base + "Short-biased. Market cautious."
+        else:
+            interp = base + "Extreme short bias. Contrarian long signal."
+
+    return records, interp
+
+
+# ======================================================
+# Handler
+# ======================================================
+
 class handler(BaseHTTPRequestHandler):
 
     METRICS = {
-        "mvrv":           get_mvrv,
-        "realized_price": get_realized_price,
-        "fear_greed":     get_fear_greed,
-        "puell":          get_puell,
-        "btc_dominance":  get_btc_dominance,
+        "mvrv":              get_mvrv,
+        "realized_price":    get_realized_price,
+        "fear_greed":        get_fear_greed,
+        "puell":             get_puell,
+        "btc_dominance":     get_btc_dominance,
+        "thermocap":         get_thermocap_ratio,
+        "stablecoin_supply": get_stablecoin_supply,
+        "long_short_ratio":  get_long_short_ratio,
     }
 
     def do_GET(self):
         params = parse_qs(urlparse(self.path).query)
         metric = params.get("metric", ["mvrv"])[0]
         days   = int(params.get("days", ["365"])[0])
-        days   = min(days, 3000)  # hard cap
+        days   = min(days, 3000)
 
         if metric not in self.METRICS:
             self._send({
@@ -225,7 +364,7 @@ class handler(BaseHTTPRequestHandler):
                 "latest":         latest,
                 "interpretation": interp,
                 "data":           records,
-                "source":         "CoinMetrics + Alternative.me + Blockchain.com + CoinGecko"
+                "source":         "CoinMetrics + Alternative.me + Blockchain.com + CoinGecko + Binance"
             }
         except Exception as e:
             result = {"error": str(e), "metric": metric}
